@@ -13,6 +13,32 @@ host. See [README](README.md) for the generic instructions.
 Also, the MSYS2 project provides both ready-made binaries and an easy
 way to self-compile from their software repository out of the box.
 
+## GitHub Actions builds for this fork
+
+The **Windows build** workflow runs on pushes, pull requests, and manual
+`workflow_dispatch` requests. It uses a Windows x64 runner and MSYS2 UCRT64
+to build the isolated AGRV2K target, CH347, CMSIS-DAP v1/v2, and FTDI MPSSE
+support. JimTcl comes from the repository's pinned submodule.
+
+Open **Actions → Windows build → a successful run → Artifacts** and download
+`openocd-windows-x64.zip`. Extract it and run:
+
+```powershell
+.\openocd-windows-x64\bin\openocd.exe --version
+.\openocd-windows-x64\bin\openocd.exe -f board/agm/agm32_vf407-cmsis-dap.cfg -c shutdown
+```
+
+The ZIP includes the executable, its transitive runtime DLLs, installed Tcl
+scripts, licenses, `build-info.json`, and `SHA256SUMS`. It targets Windows 10
+or later and does not require an MSYS2 installation to run. The workflow
+checks configuration parsing, generic RISC-V source isolation, DM contracts,
+and upstream tests, then tests the extracted package with MSYS2 removed
+from `PATH`. These checks do not access a USB adapter.
+
+`windows-build-logs` contains configuration results, dependency versions and
+the package checksum. The workflow uploads build artifacts; it does not
+create or replace GitHub Releases.
+
 ## USB adapters
 
 For the adapters that use a HID-based protocol, e.g. CMSIS-DAP, you do

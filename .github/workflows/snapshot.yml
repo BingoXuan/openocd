@@ -1,131 +1,124 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
+name: Windows build
 
-# Copyright (C) 2020 by Tarek BOUCHKATI <tarek.bouchkati@gmail.com>
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 
-on: push
+permissions:
+  contents: read
 
-name: OpenOCD Snapshot
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  package:
-    runs-on: [ubuntu-latest]
-    env:
-      DL_DIR: ../downloads
-      BUILD_DIR: ../build
+  windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
-      - name: Install needed packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install autotools-dev autoconf automake libtool pkg-config cmake texinfo texlive g++-mingw-w64-i686
-      - name: Checkout Code
-        uses: actions/checkout@v4
-      - run: ./bootstrap
-      - name: Prepare libusb1
-        env:
-          LIBUSB1_VER: 1.0.26
-        run: |
-          mkdir -p $DL_DIR && cd $DL_DIR
-          wget "https://github.com/libusb/libusb/releases/download/v${LIBUSB1_VER}/libusb-${LIBUSB1_VER}.tar.bz2"
-          tar -xjf libusb-${LIBUSB1_VER}.tar.bz2
-          echo "LIBUSB1_SRC=$PWD/libusb-${LIBUSB1_VER}" >> $GITHUB_ENV
-      - name: Prepare hidapi
-        env:
-          HIDAPI_VER: 0.13.1
-        run: |
-          mkdir -p $DL_DIR && cd $DL_DIR
-          wget "https://github.com/libusb/hidapi/archive/hidapi-${HIDAPI_VER}.tar.gz"
-          tar -xzf hidapi-${HIDAPI_VER}.tar.gz
-          cd hidapi-hidapi-${HIDAPI_VER}
-          ./bootstrap
-          echo "HIDAPI_SRC=$PWD" >> $GITHUB_ENV
-      - name: Prepare libftdi
-        env:
-          LIBFTDI_VER: 1.5
-        run: |
-          mkdir -p $DL_DIR && cd $DL_DIR
-          wget "http://www.intra2net.com/en/developer/libftdi/download/libftdi1-${LIBFTDI_VER}.tar.bz2"
-          tar -xjf libftdi1-${LIBFTDI_VER}.tar.bz2
-          echo "LIBFTDI_SRC=$PWD/libftdi1-${LIBFTDI_VER}" >> $GITHUB_ENV
-      - name: Prepare capstone
-        env:
-          CAPSTONE_VER: 4.0.2
-        run: |
-          mkdir -p $DL_DIR && cd $DL_DIR
-          CAPSTONE_NAME=${CAPSTONE_VER}
-          CAPSTONE_FOLDER=capstone-${CAPSTONE_VER}
-          wget "https://github.com/aquynh/capstone/archive/${CAPSTONE_VER}.tar.gz"
-          tar -xzf ${CAPSTONE_VER}.tar.gz
-          echo "CAPSTONE_SRC=$PWD/capstone-${CAPSTONE_VER}" >> $GITHUB_ENV
-      - name: Prepare libjaylink
-        env:
-          LIBJAYLINK_VER: 0.3.1
-        run: |
-          mkdir -p $DL_DIR && cd $DL_DIR
-          wget https://gitlab.zapb.de/libjaylink/libjaylink/-/archive/${LIBJAYLINK_VER}/libjaylink-${LIBJAYLINK_VER}.tar.gz
-          tar -xzf libjaylink-${LIBJAYLINK_VER}.tar.gz
-          cd libjaylink-${LIBJAYLINK_VER}
-          ./autogen.sh
-          echo "LIBJAYLINK_SRC=$PWD" >> $GITHUB_ENV
-      - name: Prepare jimtcl
-        env:
-          JIMTCL_VER: 0.83
-        run: |
-          mkdir -p $DL_DIR && cd $DL_DIR
-          wget https://github.com/msteveb/jimtcl/archive/refs/tags/${JIMTCL_VER}.tar.gz
-          tar -xzf ${JIMTCL_VER}.tar.gz
-          echo "JIMTCL_SRC=$PWD/jimtcl-${JIMTCL_VER}" >> $GITHUB_ENV
-      - name: Package OpenOCD for windows
-        env:
-          MAKE_JOBS: 2
-          HOST: i686-w64-mingw32
-          LIBUSB1_CONFIG: --enable-shared --disable-static
-          HIDAPI_CONFIG: --enable-shared --disable-static --disable-testgui
-          LIBFTDI_CONFIG: -DSTATICLIBS=OFF -DEXAMPLES=OFF -DFTDI_EEPROM=OFF
-          CAPSTONE_CONFIG: "CAPSTONE_BUILD_CORE_ONLY=yes CAPSTONE_STATIC=yes CAPSTONE_SHARED=no"
-          LIBJAYLINK_CONFIG: --enable-shared --disable-static
-          JIMTCL_CONFIG: --with-ext=json --minimal --disable-ssl
-        run: |
-          # check if there is tag pointing at HEAD, otherwise take the HEAD SHA-1 as OPENOCD_TAG
-          OPENOCD_TAG="`git tag --points-at HEAD`"
-          [ -z $OPENOCD_TAG ] && OPENOCD_TAG="`git rev-parse --short HEAD`"
-          # check if there is tag pointing at HEAD, if so the release will have the same name as the tag,
-          # otherwise it will be named 'latest'
-          RELEASE_NAME="`git tag --points-at HEAD`"
-          [ -z $RELEASE_NAME ] && RELEASE_NAME="latest"
-          [[ $RELEASE_NAME = "latest" ]] && IS_PRE_RELEASE="true" || IS_PRE_RELEASE="false"
-          # set env and call cross-build.sh
-          export OPENOCD_TAG=$OPENOCD_TAG
-          export OPENOCD_SRC=$PWD
-          export OPENOCD_CONFIG=""
-          mkdir -p $BUILD_DIR &&  cd $BUILD_DIR
-          bash $OPENOCD_SRC/contrib/cross-build.sh $HOST
-          # add missing dlls
-          cd $HOST-root/usr
-          cp `$HOST-gcc --print-file-name=libwinpthread-1.dll` ./bin/
-          # required by libftdi1.dll
-          cp `$HOST-gcc --print-file-name=libgcc_s_dw2-1.dll` ./bin/
-          # prepare the artifact
-          ARTIFACT="openocd-${OPENOCD_TAG}-${HOST}.tar.gz"
-          tar -czf $ARTIFACT *
-          echo "RELEASE_NAME=$RELEASE_NAME" >> $GITHUB_ENV
-          echo "IS_PRE_RELEASE=$IS_PRE_RELEASE" >> $GITHUB_ENV
-          echo "ARTIFACT_PATH=$PWD/$ARTIFACT" >> $GITHUB_ENV
-      - name: Publish OpenOCD packaged for windows
-        uses: actions/upload-artifact@v4
+      - name: Use LF line endings for build scripts
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - name: Check out source and pinned JimTcl
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          path: ${{ env.ARTIFACT_PATH }}
-      - name: Delete 'latest' Release
-        uses: dev-drprasad/delete-tag-and-release@v1.1
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
         with:
-          delete_release: true
-          tag_name: ${{ env.RELEASE_NAME }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Create Release
-        uses: ncipollo/release-action@v1
+          msystem: UCRT64
+          update: true
+          install: >-
+            autoconf automake libtool make git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libusb
+            mingw-w64-ucrt-x86_64-hidapi
+            mingw-w64-ucrt-x86_64-libftdi
+            mingw-w64-ucrt-x86_64-python
+
+      - name: Build and install Windows executable
+        run: |
+          set -euo pipefail
+          source_dir="$PWD"
+          build_dir="$(cygpath -u "$RUNNER_TEMP")/openocd-build"
+          prefix="$(cygpath -u "$RUNNER_TEMP")/openocd-windows-x64"
+          mkdir -p "$build_dir" "$prefix" ci-results dist
+          ./bootstrap nosubmodule
+          cd "$build_dir"
+          "$source_dir/configure" --host=x86_64-w64-mingw32 --prefix="$prefix" \
+            --enable-agrv2k --enable-ch347 --enable-ftdi \
+            --enable-cmsis-dap --enable-cmsis-dap-v2 --enable-internal-jimtcl \
+            --disable-jlink --without-capstone --disable-werror \
+            --disable-doxygen-html --disable-doxygen-pdf MAKEINFO=true
+          make -j4
+          make check
+          make install
+          strip "$prefix/bin/openocd.exe"
+          "$prefix/bin/openocd.exe" --version
+          cp config.log "$source_dir/ci-results/"
+          pacman -Q > "$source_dir/ci-results/msys2-packages.txt"
+          gcc --version > "$source_dir/ci-results/compiler.txt"
+
+      - name: Check AGM configuration and RISC-V isolation
+        run: |
+          set -euo pipefail
+          openocd="$(cygpath -u "$RUNNER_TEMP")/openocd-windows-x64/bin/openocd.exe"
+          python testing/agm/check-configs.py --openocd "$openocd" > ci-results/configs.json
+          python testing/agm/check-isolation.py --openocd "$openocd" > ci-results/isolation.json
+          gcc -std=c11 -Wall -Wextra -Werror -pedantic -O2 -Isrc \
+            testing/agm/test-agrv2k-dm.c src/target/agm/agrv2k_dm.c \
+            -o ci-results/test-agrv2k-dm.exe
+          ./ci-results/test-agrv2k-dm.exe | tee ci-results/dm-contracts.txt
+
+      - name: Bundle executable, runtime DLLs and scripts
+        run: |
+          set -euo pipefail
+          python contrib/package-windows.py \
+            --prefix "$(cygpath -m "$RUNNER_TEMP")/openocd-windows-x64" \
+            --runtime "$(cygpath -m "$MINGW_PREFIX")" \
+            --output dist/openocd-windows-x64.zip
+          sha256sum dist/openocd-windows-x64.zip | tee ci-results/package.sha256
+
+      - name: Test extracted package without MSYS2 on PATH
+        shell: pwsh
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'openocd-portable-test'
+          Expand-Archive -LiteralPath dist/openocd-windows-x64.zip -DestinationPath $destination
+          $exe = Join-Path $destination 'openocd-windows-x64/bin/openocd.exe'
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:OPENOCD_SCRIPTS -ErrorAction SilentlyContinue
+          Set-Location $env:RUNNER_TEMP
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'Portable executable failed to start' }
+          & $exe -f board/agm/agm32_vf407-cmsis-dap.cfg -c shutdown
+          if ($LASTEXITCODE -ne 0) { throw 'Installed AGM scripts could not be loaded' }
+
+      - name: Upload Windows ZIP
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          tag: ${{ env.RELEASE_NAME }}
-          commit: ${{ github.sha }}
-          draft: false
-          artifacts: ${{ env.ARTIFACT_PATH }}
-          prerelease: ${{ env.IS_PRE_RELEASE }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          path: dist/openocd-windows-x64.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-build-logs
+          path: |
+            ci-results/
+            ${{ runner.temp }}/openocd-build/config.log
+            ${{ runner.temp }}/openocd-build/testing/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
