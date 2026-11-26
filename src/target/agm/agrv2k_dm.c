@@ -341,12 +341,83 @@ static int memory_check(uint32_t address, unsigned int size, uint32_t count)
 	return AGRV2K_DM_OK;
 }
 
+static bool burst_read_region(uint32_t address, uint32_t count)
+{
+	uint64_t end = (uint64_t)address + 4ULL * count;
+	/* Only ordinary VF407 flash/SRAM. Never speculate on peripheral windows. */
+	return (address >= UINT32_C(0x80000000) && end <= UINT32_C(0x80100000)) ||
+		(address >= UINT32_C(0x20000000) && end <= UINT32_C(0x20020000));
+}
+
+static void store_le32(uint8_t *buffer, uint32_t value)
+{
+	for (unsigned int i = 0; i < 4; ++i)
+		buffer[i] = value >> (8 * i);
+}
+
+static int read_memory_burst(struct agrv2k_dm *dm, uint32_t address,
+		uint32_t count, uint8_t *buffer)
+{
+	int ret = sba_wait(dm);
+	if (ret != AGRV2K_DM_OK)
+		return ret;
+	uint32_t control = (2U << 17) | AGRV2K_SBREADONADDR |
+		AGRV2K_SBREADONDATA | AGRV2K_SBAUTOINCREMENT;
+	ret = agrv2k_dm_write(dm, AGRV2K_SBCS, control);
+	if (ret == AGRV2K_DM_OK)
+		ret = agrv2k_dm_write(dm, AGRV2K_SBADDRESS0, address);
+	while (ret == AGRV2K_DM_OK && count > 1) {
+		/* Every data read starts the next access. Leave the final word for
+		 * a non-triggering read, so no access goes past the requested range. */
+		unsigned int words = count - 1 < 32 ? count - 1 : 32;
+		uint32_t regs[64], values[64];
+		for (unsigned int i = 0; i < words; ++i) {
+			regs[2 * i] = AGRV2K_SBCS;
+			regs[2 * i + 1] = AGRV2K_SBDATA0;
+		}
+		if (dm->io.read_many(dm->io.ctx, regs, values, words * 2) != 0) {
+			ret = AGRV2K_DM_IO;
+			break;
+		}
+		for (unsigned int i = 0; i < words; ++i) {
+			if (values[2 * i] & (AGRV2K_SBBUSY | AGRV2K_SBBUSYERROR | AGRV2K_SBERROR_MASK)) {
+				ret = AGRV2K_DM_COMMAND_ERROR;
+				break;
+			}
+			store_le32(buffer, values[2 * i + 1]);
+			buffer += 4;
+		}
+		count -= words;
+	}
+	if (ret == AGRV2K_DM_OK)
+		ret = sba_wait(dm);
+	if (ret == AGRV2K_DM_OK)
+		/* Disable read-on-data before consuming the final prefetched word. */
+		ret = agrv2k_dm_write(dm, AGRV2K_SBCS, 2U << 17);
+	uint32_t value;
+	if (ret == AGRV2K_DM_OK)
+		ret = agrv2k_dm_read(dm, AGRV2K_SBDATA0, &value);
+	if (ret == AGRV2K_DM_OK) {
+		store_le32(buffer, value);
+		return AGRV2K_DM_OK;
+	}
+	/* Disable prefetch and clear sticky error only after the bus is idle.
+	 * A failed burst is reported; no automatic retry or method fallback. */
+	uint32_t status;
+	if (wait_bits(dm, AGRV2K_SBCS, AGRV2K_SBBUSY, 0, &status) == AGRV2K_DM_OK)
+		agrv2k_dm_write(dm, AGRV2K_SBCS, (2U << 17) | AGRV2K_SBERROR_MASK | AGRV2K_SBBUSYERROR);
+	return ret;
+}
+
 int agrv2k_dm_read_memory(struct agrv2k_dm *dm, uint32_t address,
 		unsigned int size, uint32_t count, uint8_t *buffer)
 {
 	int ret = memory_check(address, size, count);
 	if (ret != AGRV2K_DM_OK)
 		return ret;
+	if (size == 4 && count > 1 && has_sba(dm, size) && dm->io.read_many &&
+		burst_read_region(address, count))
+		return read_memory_burst(dm, address, count, buffer);
 	for (uint32_t i = 0; i < count; ++i) {
 		uint32_t value = 0;
 		ret = has_sba(dm, size) ? memory_sba(dm, address, size, false, &value) :

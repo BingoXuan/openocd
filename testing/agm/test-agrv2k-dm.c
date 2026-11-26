@@ -15,16 +15,18 @@ struct model {
 	uint32_t csr[4096];
 	uint8_t memory[SRAM_SIZE];
 	int64_t time;
-	unsigned int reads, writes, memory_writes, commands, fences;
+	unsigned int reads, writes, memory_reads, memory_writes, commands, fences, batches;
 	bool running, reset, resume_ack, have_reset;
 	bool busy_abstract, busy_sba, stall_halt, reject_csr, progbuf_exception;
 	bool error_after_store;
+	bool batch_busy_once;
 	int fail_read, fail_write;
 };
 
 static uint32_t load(struct model *m, uint32_t address, unsigned int size)
 {
 	assert(address >= SRAM_BASE && (uint64_t)address + size <= SRAM_BASE + SRAM_SIZE);
+	m->memory_reads++;
 	uint32_t result = 0;
 	for (unsigned int i = 0; i < size; ++i)
 		result |= (uint32_t)m->memory[address - SRAM_BASE + i] << (8 * i);
@@ -63,6 +65,28 @@ static int model_read(void *ctx, uint32_t reg, uint32_t *value)
 		*value |= AGRV2K_ABSTRACT_BUSY;
 	if (reg == AGRV2K_SBCS && m->busy_sba)
 		*value |= AGRV2K_SBBUSY;
+	if (reg == AGRV2K_SBDATA0 && (m->dmi[AGRV2K_SBCS] & AGRV2K_SBREADONDATA)) {
+		unsigned int size = 1U << ((m->dmi[AGRV2K_SBCS] >> 17) & 7);
+		m->dmi[AGRV2K_SBDATA0] = load(m, m->dmi[AGRV2K_SBADDRESS0], size);
+		if (m->dmi[AGRV2K_SBCS] & AGRV2K_SBAUTOINCREMENT)
+			m->dmi[AGRV2K_SBADDRESS0] += size;
+	}
+	return 0;
+}
+
+static int model_read_many(void *ctx, const uint32_t *regs,
+		uint32_t *values, unsigned int count)
+{
+	struct model *m = ctx;
+	m->batches++;
+	for (unsigned int i = 0; i < count; ++i) {
+		if (model_read(ctx, regs[i], &values[i]) != 0)
+			return -1;
+		if (m->batch_busy_once && regs[i] == AGRV2K_SBCS) {
+			values[i] |= AGRV2K_SBBUSY;
+			m->batch_busy_once = false;
+		}
+	}
 	return 0;
 }
 
@@ -165,7 +189,10 @@ static int model_write(void *ctx, uint32_t reg, uint32_t value)
 		m->dmi[reg] = fixed | (errors & ~value) | (value & UINT32_C(0x1f8000));
 		return 0;
 	} else if (reg == AGRV2K_SBADDRESS0 && (m->dmi[AGRV2K_SBCS] & AGRV2K_SBREADONADDR)) {
-		m->dmi[AGRV2K_SBDATA0] = load(m, value, 1U << ((m->dmi[AGRV2K_SBCS] >> 17) & 7));
+		unsigned int size = 1U << ((m->dmi[AGRV2K_SBCS] >> 17) & 7);
+		m->dmi[AGRV2K_SBDATA0] = load(m, value, size);
+		m->dmi[reg] = value + ((m->dmi[AGRV2K_SBCS] & AGRV2K_SBAUTOINCREMENT) ? size : 0);
+		return 0;
 	} else if (reg == AGRV2K_SBDATA0) {
 		store(m, m->dmi[AGRV2K_SBADDRESS0], 1U << ((m->dmi[AGRV2K_SBCS] >> 17) & 7), value);
 		if (m->error_after_store)
@@ -197,7 +224,8 @@ static struct agrv2k_dm make_dm(struct model *m)
 	for (unsigned int i = 1; i < 32; ++i)
 		m->gpr[i] = UINT32_C(0x12340000) + i;
 	return (struct agrv2k_dm) {
-		.io = {model_read, model_write, model_now, model_sleep, m},
+		.io = {.read = model_read, .write = model_write, .now_ms = model_now,
+			.sleep_ms = model_sleep, .ctx = m, .read_many = model_read_many},
 		.timeout_ms = 10,
 	};
 }
@@ -345,6 +373,32 @@ static void check_reset_and_contexts(void)
 	assert(agrv2k_dm_reg_read(&db, 0x1001, &value) == 0 && value == 0x12340001);
 }
 
+static void check_burst(void)
+{
+	struct model m;
+	struct agrv2k_dm dm = make_dm(&m);
+	assert(agrv2k_dm_examine(&dm) == 0);
+	for (unsigned int i = 0; i < SRAM_SIZE; ++i)
+		m.memory[i] = (i * 37) ^ 0xa5;
+	uint8_t output[SRAM_SIZE];
+	assert(agrv2k_dm_read_memory(&dm, SRAM_BASE, 4, SRAM_SIZE / 4, output) == 0);
+	assert(!memcmp(output, m.memory, sizeof(output)));
+	assert(m.memory_reads == SRAM_SIZE / 4 && m.batches == 2);
+	assert(!(m.dmi[AGRV2K_SBCS] & AGRV2K_SBREADONDATA));
+	/* A read at the last two words must not prefetch outside bounded SRAM. */
+	assert(agrv2k_dm_read_memory(&dm, SRAM_BASE + SRAM_SIZE - 8, 4, 2, output) == 0);
+	assert(!memcmp(output, m.memory + SRAM_SIZE - 8, 8));
+	m.batch_busy_once = true;
+	unsigned int before = m.memory_reads;
+	assert(agrv2k_dm_read_memory(&dm, SRAM_BASE, 4, 2, output) == AGRV2K_DM_COMMAND_ERROR);
+	assert(m.memory_reads - before == 2 && m.commands == 0);
+	assert(!(m.dmi[AGRV2K_SBCS] & AGRV2K_SBREADONDATA));
+	assert(agrv2k_dm_read_memory(&dm, SRAM_BASE, 4, 2, output) == 0);
+	m.fail_read = AGRV2K_SBDATA0;
+	assert(agrv2k_dm_read_memory(&dm, SRAM_BASE, 4, 2, output) == AGRV2K_DM_IO);
+	assert(!(m.dmi[AGRV2K_SBCS] & AGRV2K_SBREADONDATA));
+}
+
 int main(void)
 {
 	check_probe();
@@ -354,6 +408,7 @@ int main(void)
 	check_failures();
 	check_progbuf_failure();
 	check_reset_and_contexts();
-	puts("AGRV2K_DM_CONTRACTS_PASS groups=7");
+	check_burst();
+	puts("AGRV2K_DM_CONTRACTS_PASS groups=8");
 	return 0;
 }

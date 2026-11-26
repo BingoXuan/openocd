@@ -55,6 +55,24 @@ static int agrv2k_ap_write(void *ctx, uint32_t reg, uint32_t value)
 	return ret;
 }
 
+static int agrv2k_ap_read_many(void *ctx, const uint32_t *regs,
+		uint32_t *values, unsigned int count)
+{
+	struct agrv2k_common *common = ctx;
+	int queued = ERROR_OK;
+	for (unsigned int i = 0; i < count && queued == ERROR_OK; ++i) {
+		target_addr_t address = (target_addr_t)common->target->dbgbase + 4ULL * regs[i];
+		queued = mem_ap_read_u32(common->ap, address, &values[i]);
+	}
+	/* Flush even after queue failure: destinations must outlive queued reads. */
+	int ret = dap_run(common->ap->dap);
+	if (queued != ERROR_OK)
+		ret = queued;
+	if (ret != ERROR_OK)
+		common->last_io_error = ret;
+	return ret;
+}
+
 static int64_t agrv2k_now_ms(void *ctx)
 {
 	return timeval_ms();
@@ -143,6 +161,7 @@ static int agrv2k_create(struct target *target)
 	common->dm.io = (struct agrv2k_dm_io) {
 		.read = agrv2k_ap_read, .write = agrv2k_ap_write,
 		.now_ms = agrv2k_now_ms, .sleep_ms = agrv2k_sleep_ms, .ctx = common,
+		.read_many = agrv2k_ap_read_many,
 	};
 	common->dm.timeout_ms = 1000;
 	common->cache.name = "agrv2k-rv32";
@@ -249,6 +268,7 @@ static int agrv2k_examine(struct target *target)
 		return ret;
 	LOG_TARGET_INFO(target, "Isolated RV32 DM version %u, AP 0x%" PRIx64 ", progbuf %u words",
 		common->dm.version, pc->ap_num, common->dm.progbuf_words);
+	LOG_TARGET_INFO(target, "SBCS=0x%08" PRIx32, common->dm.sbcs);
 	target_set_examined(target);
 	return agrv2k_poll(target);
 }
@@ -381,8 +401,6 @@ struct target_type agrv2k_target = {
 	.deassert_reset = agrv2k_reset_deassert,
 	.read_memory = agrv2k_read_memory,
 	.write_memory = agrv2k_write_memory,
-	.read_phys_memory = agrv2k_read_memory,
-	.write_phys_memory = agrv2k_write_memory,
 	.get_gdb_arch = agrv2k_gdb_arch,
 	.get_gdb_reg_list = agrv2k_gdb_regs,
 	.get_gdb_reg_list_noread = agrv2k_gdb_regs,

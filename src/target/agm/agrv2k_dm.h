@@ -48,6 +48,8 @@ enum agrv2k_dm_register {
 #define AGRV2K_SBBUSY (UINT32_C(1) << 21)
 #define AGRV2K_SBBUSYERROR (UINT32_C(1) << 22)
 #define AGRV2K_SBREADONADDR (UINT32_C(1) << 20)
+#define AGRV2K_SBAUTOINCREMENT (UINT32_C(1) << 16)
+#define AGRV2K_SBREADONDATA (UINT32_C(1) << 15)
 #define AGRV2K_CSR_DCSR 0x7b0
 #define AGRV2K_CSR_DPC 0x7b1
 #define AGRV2K_GPR_BASE 0x1000
@@ -59,6 +61,8 @@ struct agrv2k_dm_io {
 	int64_t (*now_ms)(void *ctx);
 	void (*sleep_ms)(void *ctx, unsigned int ms);
 	void *ctx;
+	/* Optional ordered batch of DMI reads, completed before returning. */
+	int (*read_many)(void *ctx, const uint32_t *regs, uint32_t *values, unsigned int count);
 };
 
 struct agrv2k_dm {
