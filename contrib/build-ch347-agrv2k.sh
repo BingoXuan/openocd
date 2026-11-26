@@ -22,7 +22,7 @@ git submodule update --init --depth 1 jimtcl
 cd "$build_dir"
 "$source_dir/configure" --prefix="$prefix" \
     --enable-ch347 --enable-cmsis-dap --enable-internal-jimtcl \
-    --disable-jlink --disable-capstone --disable-werror \
+    --disable-jlink --without-capstone --disable-werror \
     --disable-doxygen-html --disable-doxygen-pdf MAKEINFO=true
 make -j"$jobs"
 make install
