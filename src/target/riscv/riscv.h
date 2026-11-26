@@ -12,6 +12,7 @@ struct riscv_program;
 #include "target/semihosting_common.h"
 #include "target/target.h"
 #include "target/register.h"
+#include <target/arm_adi_v5.h>
 #include <helper/command.h>
 #include <helper/bits.h>
 
@@ -329,6 +330,8 @@ struct riscv_info {
 
 	unsigned int (*data_bits)(struct target *target);
 
+	struct adiv5_ap *(*get_dmi_ap)(struct target *target);
+
 	COMMAND_HELPER((*print_info), struct target *target);
 
 	/* Storage for arch_info of non-custom registers. */
@@ -387,6 +390,8 @@ struct riscv_info {
 	bool wp_allow_ge_lt_trigger;
 
 	bool autofence;
+	/* RISC-V Debug Module accessed through an ADIv5 MEM-AP. */
+	bool alternative_dmi;
 };
 
 static inline riscv_reg_t riscv_priv_mode_to_prv(enum riscv_priv_mode mode)
@@ -411,6 +416,7 @@ struct riscv_private_config {
 	bool dcsr_cetrig;
 	bool detect_misa;
 	bool sba_flush_cache;
+	struct adiv5_private_config adi_pc;
 };
 
 static inline struct riscv_private_config

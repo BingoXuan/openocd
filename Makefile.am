@@ -65,6 +65,9 @@ EXTRA_DIST += \
 	NEWTAPS \
 	README.Windows.md \
 	README.macOS.md \
+	README.ch347-agrv2k.md \
+	testing/agm/check-configs.py \
+	testing/agm/flash-contracts.tcl \
 	$(EXTRA_DIST_NEWS) \
 	Doxyfile.in \
 	LICENSES/license-rules.txt \

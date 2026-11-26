@@ -1,5 +1,9 @@
 # Welcome to OpenOCD
 
+This fork adds experimental AGM VF407 / AGRV2K RISC-V-over-ADIv5 support
+alongside upstream CH347 JTAG/SWD. See the
+[build instructions and validation limits](README.ch347-agrv2k.md).
+
 OpenOCD provides on-chip programming and debugging support with a
 layered architecture of JTAG interface and TAP support including:
 

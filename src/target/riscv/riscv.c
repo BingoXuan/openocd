@@ -14,6 +14,7 @@
 #include "target/target.h"
 #include "target/algorithm.h"
 #include "target/target_type.h"
+#include <target/arm_adi_v5.h>
 #include <target/smp.h>
 #include "jtag/jtag.h"
 #include "target/register.h"
@@ -660,7 +661,7 @@ static int riscv_jim_configure(struct target *target,
 	int e = jim_nvp_name2value_obj(goi->interp, nvp_config_opts,
 				goi->argv[0], &n);
 	if (e != JIM_OK)
-		return JIM_CONTINUE;
+		return adiv5_jim_configure_ext(target, goi, &config->adi_pc, ADI_CONFIGURE_DAP_OPTIONAL);
 
 	e = jim_getopt_obj(goi, NULL);
 	if (e != JIM_OK)
@@ -781,12 +782,11 @@ static void riscv_deinit_target(struct target *target)
 {
 	LOG_TARGET_DEBUG(target, "riscv_deinit_target()");
 
-	free(target->private_config);
-
 	struct riscv_info *info = target->arch_info;
-	struct target_type *tt = get_target_type(target);
-	if (!tt)
-		LOG_TARGET_ERROR(target, "Could not identify target type.");
+	struct target_type *tt = NULL;
+	/* Configuration-only sessions have not selected a DTM implementation yet. */
+	if (info && info->dtm_version != DTM_DTMCS_VERSION_UNKNOWN)
+		tt = get_target_type(target);
 
 	if (riscv_reg_flush_all(target) != ERROR_OK)
 		LOG_TARGET_ERROR(target, "Failed to flush registers. Ignoring this error.");
@@ -794,12 +794,16 @@ static void riscv_deinit_target(struct target *target)
 	if (tt && info && info->version_specific)
 		tt->deinit_target(target);
 
+	/* Keep the DAP configuration alive until transport cleanup has completed. */
+	free(target->private_config);
+	target->private_config = NULL;
+
 	riscv_reg_free_all(target);
-	free_wp_triggers_cache(target);
 
 	if (!info)
 		return;
 
+	free_wp_triggers_cache(target);
 	free(info->reserved_triggers);
 
 	range_list_t *entry, *tmp;
@@ -2599,14 +2603,24 @@ static int riscv_examine(struct target *target)
 	/* Don't need to select dbus, since the first thing we do is read dtmcontrol. */
 
 	RISCV_INFO(info);
-	uint32_t dtmcontrol;
-	if (dtmcs_scan(target->tap, 0, &dtmcontrol) != ERROR_OK || dtmcontrol == 0) {
-		LOG_TARGET_ERROR(target, "Could not read dtmcontrol. Check JTAG connectivity/board power.");
-		return ERROR_FAIL;
+	uint32_t dtm_version;
+
+	struct riscv_private_config *config = target->private_config;
+	struct adiv5_private_config *pc = &config->adi_pc;
+	if (adiv5_verify_config(pc) == ERROR_OK) {
+		dtm_version = 1;
+		info->alternative_dmi = true;
+	} else {
+		uint32_t dtmcontrol;
+		if (dtmcs_scan(target->tap, 0, &dtmcontrol) != ERROR_OK || dtmcontrol == 0) {
+			LOG_TARGET_ERROR(target, "Could not read dtmcontrol. Check JTAG connectivity/board power.");
+			return ERROR_FAIL;
+		}
+
+		LOG_TARGET_DEBUG(target, "dtmcontrol=0x%" PRIx32, dtmcontrol);
+		dtm_version = get_field(dtmcontrol, DTMCONTROL_VERSION);
+		LOG_TARGET_DEBUG(target, "version=0x%" PRIx32, dtm_version);
 	}
-	LOG_TARGET_DEBUG(target, "dtmcontrol=0x%" PRIx32, dtmcontrol);
-	uint32_t dtm_version = get_field(dtmcontrol, DTMCONTROL_VERSION);
-	LOG_TARGET_DEBUG(target, "version=0x%" PRIx32, dtm_version);
 
 	struct target_type *tt;
 	if (info->dtm_version == DTM_DTMCS_VERSION_UNKNOWN) {
