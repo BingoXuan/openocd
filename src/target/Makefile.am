@@ -37,6 +37,13 @@ if HAVE_CAPSTONE
 %C%_libtarget_la_SOURCES += %D%/oocd_capstone.c
 endif
 
+if AGRV2K
+%C%_libtarget_la_SOURCES += \
+	%D%/agm/agrv2k.c \
+	%D%/agm/agrv2k_dm.c \
+	%D%/agm/agrv2k_dm.h
+endif
+
 TARGET_CORE_SRC = \
 	%D%/algorithm.c \
 	%D%/register.c \

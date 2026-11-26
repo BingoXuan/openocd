@@ -262,6 +262,16 @@ AC_ARG_ENABLE([gcov],
   AS_HELP_STRING([--enable-gcov], [Enable runtime coverage collection via gcov]),
   [enable_gcov=$enableval], [enable_gcov=no])
 
+AC_ARG_ENABLE([agrv2k],
+  AS_HELP_STRING([--enable-agrv2k], [Build the isolated experimental AGM AGRV2K target]),
+  [], [enable_agrv2k=no])
+AS_CASE([$enable_agrv2k], [yes|no], [],
+  [AC_MSG_ERROR([--enable-agrv2k accepts yes or no])])
+AS_IF([test "x$enable_agrv2k" = "xyes"],
+  [AC_DEFINE([BUILD_AGRV2K], [1], [Build isolated AGRV2K target.])],
+  [AC_DEFINE([BUILD_AGRV2K], [0], [Build isolated AGRV2K target.])])
+AM_CONDITIONAL([AGRV2K], [test "x$enable_agrv2k" = "xyes"])
+
 AS_IF([test "x$enable_gcov" = "xyes"], [
   AC_DEFINE([USE_GCOV], [1], [1 to enable coverage collection using gcov.])
   dnl When collecting coverage, disable optimizations.

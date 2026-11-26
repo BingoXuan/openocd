@@ -330,6 +330,9 @@ struct target_type {
 
 // Keep in alphabetic order this list of targets
 extern struct target_type aarch64_target;
+#if BUILD_AGRV2K
+extern struct target_type agrv2k_target;
+#endif
 extern struct target_type arcv2_target;
 extern struct target_type arm11_target;
 extern struct target_type arm720t_target;

@@ -75,6 +75,9 @@ static int target_gdb_fileio_end_default(struct target *target, int retcode,
 static struct target_type *target_types[] = {
 	// Keep in alphabetic order this list of targets
 	&aarch64_target,
+#if BUILD_AGRV2K
+	&agrv2k_target,
+#endif
 	&arcv2_target,
 	&arm11_target,
 	&arm720t_target,

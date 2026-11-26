@@ -1,5 +1,9 @@
 # Welcome to OpenOCD
 
+This branch adds an opt-in, isolated `agrv2k` target alongside upstream
+CH347 JTAG/SWD. Generic RISC-V sources are identical to upstream. See the
+[build instructions and validation limits](README.ch347-agrv2k.md).
+
 OpenOCD provides on-chip programming and debugging support with a
 layered architecture of JTAG interface and TAP support including:
 
