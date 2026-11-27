@@ -15,8 +15,10 @@ way to self-compile from their software repository out of the box.
 
 ## GitHub Actions builds for this fork
 
-The **Windows build** workflow runs on pushes, pull requests, and manual
-`workflow_dispatch` requests. It uses a Windows x64 runner and MSYS2 UCRT64
+The **Windows build** workflow runs on pushes and pull requests targeting
+`feat-agrv2k-support`. The fork's default
+branch follows upstream without fork-specific CI changes.
+It uses a Windows x64 runner and MSYS2 UCRT64
 to build the isolated AGRV2K target, CH347, CMSIS-DAP v1/v2, and FTDI MPSSE
 support. JimTcl comes from the repository's pinned submodule.
 
@@ -34,6 +36,10 @@ or later and does not require an MSYS2 installation to run. The workflow
 checks configuration parsing, generic RISC-V source isolation, DM contracts,
 and upstream tests, then tests the extracted package with MSYS2 removed
 from `PATH`. These checks do not access a USB adapter.
+
+AGRV2K main Flash uses the native SRAM FIFO loader. See
+[README.agrv2k-flash.md](README.agrv2k-flash.md) for programming commands,
+partition bounds and the compatible `agrv2k_flash_program` Tcl entry point.
 
 `windows-build-logs` contains configuration results, dependency versions and
 the package checksum. The workflow uploads build artifacts; it does not

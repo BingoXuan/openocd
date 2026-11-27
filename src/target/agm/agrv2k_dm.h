@@ -63,6 +63,8 @@ struct agrv2k_dm_io {
 	void *ctx;
 	/* Optional ordered batch of DMI reads, completed before returning. */
 	int (*read_many)(void *ctx, const uint32_t *regs, uint32_t *values, unsigned int count);
+	/* Optional ordered writes, completed before returning; SRAM staging only. */
+	int (*write_many)(void *ctx, uint32_t reg, const uint32_t *values, unsigned int count);
 };
 
 struct agrv2k_dm {

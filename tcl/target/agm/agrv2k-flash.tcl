@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Experimental host-driven AGRV2K main-flash operations.
+# Explicit AGRV2K main-flash operations. Writes use the native SRAM FIFO loader.
 # Registers: AGM SDK/Leego flash_agrv2k.c; transport: AGaMEMnon program.py.
 # These procedures run only when explicitly called. No option-byte writes.
 
@@ -93,7 +93,7 @@ proc agrv2k_flash_erase {address length} {
 }
 
 proc agrv2k_flash_program {filename address} {
-	global AGRV2K_FLASH_CONTROLLER
+	global AGRV2K_TARGET
 	set file [open $filename rb]
 	set failed [catch {set data [read $file]} failure]
 	close $file
@@ -101,22 +101,12 @@ proc agrv2k_flash_program {filename address} {
 	set count [string bytelength $data]
 	set address [agrv2k_flash_bounds $address [expr {($count + 3) & ~3}]]
 	if {$address & 3} { error "AGRV2K write address must be word aligned" }
-	set idle [agrv2k_flash_prepare]
-	set failed [catch {
-		mww [expr {$AGRV2K_FLASH_CONTROLLER + 0x10}] [expr {$idle | 1}]
-		for {set offset 0} {$offset < $count} {incr offset 4} {
-			set bits [expr {($count - $offset < 4 ? $count - $offset : 4) * 8}]
-			set word [unpack $data -uintle [expr {$offset * 8}] $bits]
-			if {$bits < 32} {
-				set word [expr {$word | ((0xffffffff << $bits) & 0xffffffff)}]
-			}
-			mww [expr {$AGRV2K_FLASH_CONTROLLER + 0x0c}] 0x34
-			mww [expr {$address + $offset}] $word
-			agrv2k_flash_wait 20 1
-		}
-	} failure]
-	set lock_failed [catch {agrv2k_flash_lock $idle} lock_failure]
-	if {$failed} { error $failure }
-	if {$lock_failed} { error $lock_failure }
+	targets $AGRV2K_TARGET
+	if {[$AGRV2K_TARGET curstate] ne "halted"} {
+		error "AGRV2K must already be halted before a flash operation"
+	}
+	# Native driver pads the final word, streams through SRAM, restores the
+	# hart/work area and relocks on success and failure. No slow fallback.
+	flash write_image $filename $address bin
 	verify_image $filename $address bin
 }

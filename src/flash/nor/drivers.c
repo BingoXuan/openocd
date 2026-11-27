@@ -19,6 +19,9 @@ static const struct flash_driver * const flash_drivers[] = {
 	// Keep in alphabetic order the list of drivers
 	&aduc702x_flash,
 	&aducm360_flash,
+#if BUILD_AGRV2K
+	&agrv2k_flash,
+#endif
 	&am13_flash,
 	&ambiqmicro_flash,
 	&artery_flash,

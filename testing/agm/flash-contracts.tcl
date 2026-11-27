@@ -12,6 +12,8 @@ set AGRV2K_FLASH_SECTOR_SIZE 0x1000
 set AGRV2K_FLASH_CONTROLLER 0x40001000
 set writes {}
 set verified 0
+set flash_calls {}
+set mock_flash_error 0
 set mock_time 0
 set mock_state halted
 set mock_fault 0
@@ -28,6 +30,11 @@ proc sleep {duration} { global mock_time; incr mock_time $duration }
 proc targets {name} {}
 proc agrv2k.cpu {operation} { global mock_state; return $mock_state }
 proc verify_image {filename address type} { global verified; incr verified }
+proc flash {operation filename address type} {
+	global flash_calls mock_flash_error
+	if {$mock_flash_error} { error "injected native loader failure" }
+	lappend flash_calls [list $operation $filename $address $type]
+}
 proc read_memory {address width count} {
 	global regs mock_unlock_read_error key_state
 	set address [expr {$address}]
@@ -94,20 +101,16 @@ set writes {}
 assert_equal [catch {agrv2k_flash_program $image 0x800e6ffc}] 1 "Padding must not cross CPLD boundary"
 assert_equal [llength $writes] 0 "Cross-boundary image must not unlock flash"
 agrv2k_flash_program $image 0x800e5000
-assert_equal $regs(2148421632) [expr {0xff00a9c2}] "Binary bytes and little-endian first word"
-assert_equal $regs(2148421636) [expr {0xffff6655}] "Partial word must pad with erased bytes"
+assert_equal [llength $flash_calls] 1 "Program must delegate once to the native Flash driver"
+assert_equal [lindex $flash_calls 0] [list write_image $image [expr {0x800e5000}] bin] "Native loader arguments"
+assert_equal [llength $writes] 0 "No host-side per-word Flash writes"
 assert_equal $verified 1 "Program must verify the original image"
-assert_equal [expr {$regs(1073745936) & 128}] 128 "Program must relock controller"
-
-set mock_fault 1
-assert_equal [catch {agrv2k_flash_program $image 0x800e5000}] 1 "Programming error must propagate"
-assert_equal [expr {$regs(1073745936) & 128}] 128 "Programming error must relock when idle"
+set mock_flash_error 1
+assert_equal [catch {agrv2k_flash_program $image 0x800e5000}] 1 "Native programming error must propagate"
 assert_equal $verified 1 "Failed program must not be marked verified"
-
-set mock_fault 0
-set regs(1073745932) 0
-set mock_fault 2
-assert_equal [catch {agrv2k_flash_program $image 0x800e5000}] 1 "Busy timeout must propagate"
-assert_equal [expr {$mock_time >= 20}] 1 "Busy polling must have a deadline"
-assert_equal $verified 1 "Timed-out program must not be marked verified"
+assert_equal [llength $writes] 0 "Native failure must not fall back to host programming"
+set mock_flash_error 0
+set mock_state running
+assert_equal [catch {agrv2k_flash_program $image 0x800e5000}] 1 "Running target rejected before native call"
+assert_equal [llength $flash_calls] 1 "Running target must not call native driver"
 puts "AGRV2K_FLASH_CONTRACTS_PASS"

@@ -112,3 +112,7 @@ NORHEADERS = \
 	%D%/stm32l4x.h \
 	%D%/stmqspi.h \
 	%D%/msp432.h
+
+if AGRV2K
+NOR_DRIVERS += %D%/agrv2k.c
+endif

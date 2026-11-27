@@ -11,6 +11,7 @@
 #include "target/target_type.h"
 #include "target/arm_adi_v5.h"
 #include "target/register.h"
+#include "target/algorithm.h"
 #include <helper/binarybuffer.h>
 #include <helper/time_support.h>
 
@@ -33,6 +34,9 @@ struct agrv2k_common {
 	struct reg regs[AGRV2K_TOTAL_REGS];
 	struct agrv2k_reg reg_info[AGRV2K_TOTAL_REGS];
 	uint8_t reg_values[AGRV2K_TOTAL_REGS][4];
+	bool algorithm_active;
+	uint32_t saved_gpr[32];
+	uint32_t saved_pc, saved_dcsr, saved_mstatus;
 };
 
 static int agrv2k_ap_read(void *ctx, uint32_t reg, uint32_t *value)
@@ -76,6 +80,22 @@ static int agrv2k_ap_read_many(void *ctx, const uint32_t *regs,
 static int64_t agrv2k_now_ms(void *ctx)
 {
 	return timeval_ms();
+}
+
+static int agrv2k_ap_write_many(void *ctx, uint32_t reg,
+		const uint32_t *values, unsigned int count)
+{
+	struct agrv2k_common *common = ctx;
+	target_addr_t address = (target_addr_t)common->target->dbgbase + 4ULL * reg;
+	int queued = ERROR_OK;
+	for (unsigned int i = 0; i < count && queued == ERROR_OK; ++i)
+		queued = mem_ap_write_u32(common->ap, address, values[i]);
+	int ret = dap_run(common->ap->dap);
+	if (queued != ERROR_OK)
+		ret = queued;
+	if (ret != ERROR_OK)
+		common->last_io_error = ret;
+	return ret;
 }
 
 static void agrv2k_sleep_ms(void *ctx, unsigned int ms)
@@ -162,6 +182,7 @@ static int agrv2k_create(struct target *target)
 		.read = agrv2k_ap_read, .write = agrv2k_ap_write,
 		.now_ms = agrv2k_now_ms, .sleep_ms = agrv2k_sleep_ms, .ctx = common,
 		.read_many = agrv2k_ap_read_many,
+		.write_many = agrv2k_ap_write_many,
 	};
 	common->dm.timeout_ms = 1000;
 	common->cache.name = "agrv2k-rv32";
@@ -330,6 +351,8 @@ static int agrv2k_reset_assert(struct target *target)
 	int ret = agrv2k_result(common, agrv2k_dm_reset_assert(&common->dm, target->reset_halt));
 	if (ret == ERROR_OK) {
 		register_cache_invalidate(&common->cache);
+		common->algorithm_active = false;
+		target->running_alg = false;
 		target->state = TARGET_RESET;
 	}
 	return ret;
@@ -355,9 +378,208 @@ static int agrv2k_write_memory(struct target *target, target_addr_t address,
 		uint32_t size, uint32_t count, const uint8_t *buffer)
 {
 	struct agrv2k_common *common = target->arch_info;
+	LOG_TARGET_DEBUG(target, "AGRV2K memory write: address=0x%08" PRIx64
+		", size=%" PRIu32 ", count=%" PRIu32 ", SBA=0x%08" PRIx32 ", batch=%u",
+		(uint64_t)address, size, count, common->dm.sbcs, common->dm.io.write_many != NULL);
 	if (address > UINT32_MAX)
 		return ERROR_COMMAND_ARGUMENT_INVALID;
 	return agrv2k_result(common, agrv2k_dm_write_memory(&common->dm, address, size, count, buffer));
+}
+
+static bool agrv2k_direction_valid(enum param_direction direction)
+{
+	return direction == PARAM_IN || direction == PARAM_OUT || direction == PARAM_IN_OUT;
+}
+
+static struct reg *agrv2k_algorithm_reg(struct target *target, const struct reg_param *param)
+{
+	struct reg *reg = register_get_by_name(target->reg_cache, param->reg_name, false);
+	if (!reg || reg->number < 1 || reg->number > 31 || param->size != 32 ||
+		!agrv2k_direction_valid(param->direction))
+		return NULL;
+	return reg;
+}
+
+static int agrv2k_restore_algorithm(struct target *target)
+{
+	struct agrv2k_common *common = target->arch_info;
+	/* A failed resume may have issued RESUMEREQ before losing the link.
+	 * Never trust the cached state before restoring registers or SRAM. */
+	int halted = agrv2k_halt(target);
+	if (halted != ERROR_OK) {
+		target->state = TARGET_UNKNOWN;
+		LOG_TARGET_ERROR(target, "Cannot halt SRAM algorithm; reset and reconnect required");
+		return halted;
+	}
+	int result = AGRV2K_DM_OK;
+	for (unsigned int i = 1; i < 32; ++i) {
+		int ret = agrv2k_dm_reg_write(&common->dm, AGRV2K_GPR_BASE + i, common->saved_gpr[i]);
+		if (result == AGRV2K_DM_OK)
+			result = ret;
+	}
+	const uint32_t regs[] = {AGRV2K_CSR_DPC, AGRV2K_CSR_DCSR, 0x300};
+	const uint32_t values[] = {common->saved_pc, common->saved_dcsr, common->saved_mstatus};
+	for (unsigned int i = 0; i < ARRAY_SIZE(regs); ++i) {
+		int ret = agrv2k_dm_reg_write(&common->dm, regs[i], values[i]);
+		if (result == AGRV2K_DM_OK)
+			result = ret;
+	}
+	register_cache_invalidate(&common->cache);
+	if (result == AGRV2K_DM_OK) {
+		common->algorithm_active = false;
+		target->running_alg = false;
+	}
+	return agrv2k_result(common, result);
+}
+
+static int agrv2k_start_algorithm(struct target *target,
+		int num_mem_params, struct mem_param *mem_params,
+		int num_reg_params, struct reg_param *reg_params,
+		target_addr_t entry_point, target_addr_t exit_point, void *arch_info)
+{
+	struct agrv2k_common *common = target->arch_info;
+	if (target->state != TARGET_HALTED)
+		return ERROR_TARGET_NOT_HALTED;
+	if (common->algorithm_active || entry_point < 0x20000000 || entry_point >= 0x20020000 ||
+		(entry_point & 1) || exit_point > UINT32_MAX || num_mem_params < 0 || num_reg_params < 0)
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	for (int i = 0; i < num_reg_params; ++i) {
+		if (!agrv2k_algorithm_reg(target, &reg_params[i]))
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
+	for (int i = 0; i < num_mem_params; ++i) {
+		if (!agrv2k_direction_valid(mem_params[i].direction))
+			return ERROR_COMMAND_ARGUMENT_INVALID;
+	}
+	/* Save every GPR, not just argument registers: loaders may use temporaries
+	 * without exposing those as arguments. Never borrow the application's stack. */
+	for (unsigned int i = 1; i < 32; ++i) {
+		int ret = agrv2k_dm_reg_read(&common->dm, AGRV2K_GPR_BASE + i, &common->saved_gpr[i]);
+		if (ret != AGRV2K_DM_OK)
+			return agrv2k_result(common, ret);
+	}
+	int ret = agrv2k_dm_reg_read(&common->dm, AGRV2K_CSR_DPC, &common->saved_pc);
+	if (ret == AGRV2K_DM_OK)
+		ret = agrv2k_dm_reg_read(&common->dm, AGRV2K_CSR_DCSR, &common->saved_dcsr);
+	if (ret == AGRV2K_DM_OK)
+		ret = agrv2k_dm_reg_read(&common->dm, 0x300, &common->saved_mstatus);
+	if (ret != AGRV2K_DM_OK)
+		return agrv2k_result(common, ret);
+	common->algorithm_active = true;
+	ret = agrv2k_result(common, agrv2k_dm_reg_write(&common->dm, 0x300,
+		common->saved_mstatus & ~UINT32_C(0xb)));
+	for (int i = 0; ret == ERROR_OK && i < num_mem_params; ++i) {
+		if (mem_params[i].direction != PARAM_IN)
+			ret = target_write_buffer(target, mem_params[i].address, mem_params[i].size, mem_params[i].value);
+	}
+	for (int i = 0; ret == ERROR_OK && i < num_reg_params; ++i) {
+		if (reg_params[i].direction != PARAM_IN) {
+			struct reg *reg = agrv2k_algorithm_reg(target, &reg_params[i]);
+			ret = reg->type->set(reg, reg_params[i].value);
+		}
+	}
+	if (ret == ERROR_OK)
+		ret = agrv2k_resume(target, false, entry_point, false, true);
+	if (ret != ERROR_OK) {
+		int cleanup = agrv2k_restore_algorithm(target);
+		if (cleanup != ERROR_OK)
+			return cleanup;
+	}
+	return ret;
+}
+
+static int agrv2k_wait_algorithm(struct target *target,
+		int num_mem_params, struct mem_param *mem_params,
+		int num_reg_params, struct reg_param *reg_params,
+		target_addr_t exit_point, unsigned int timeout_ms, void *arch_info)
+{
+	struct agrv2k_common *common = target->arch_info;
+	if (!common->algorithm_active)
+		return ERROR_FAIL;
+	int64_t deadline = timeval_ms() + timeout_ms;
+	int ret = ERROR_OK;
+	while (target->state != TARGET_HALTED) {
+		ret = agrv2k_poll(target);
+		if (ret != ERROR_OK || target->state == TARGET_HALTED)
+			break;
+		if (timeval_ms() >= deadline) {
+			ret = ERROR_TARGET_TIMEOUT;
+			break;
+		}
+		alive_sleep(1);
+	}
+	if (ret == ERROR_OK) {
+		uint32_t pc;
+		ret = agrv2k_result(common, agrv2k_dm_reg_read(&common->dm, AGRV2K_CSR_DPC, &pc));
+		if (ret == ERROR_OK && ((exit_point && pc != exit_point) ||
+			target->debug_reason != DBG_REASON_BREAKPOINT)) {
+			LOG_TARGET_ERROR(target, "SRAM algorithm stopped at unexpected PC 0x%08" PRIx32, pc);
+			ret = ERROR_TARGET_ALGO_EXIT;
+		}
+	}
+	for (int i = 0; ret == ERROR_OK && i < num_reg_params; ++i) {
+		if (reg_params[i].direction != PARAM_OUT) {
+			struct reg *reg = agrv2k_algorithm_reg(target, &reg_params[i]);
+			if (!reg)
+				ret = ERROR_COMMAND_ARGUMENT_INVALID;
+			else {
+				ret = reg->type->get(reg);
+				if (ret == ERROR_OK)
+					buf_cpy(reg->value, reg_params[i].value, 32);
+			}
+		}
+	}
+	for (int i = 0; ret == ERROR_OK && i < num_mem_params; ++i) {
+		if (mem_params[i].direction != PARAM_OUT)
+			ret = target_read_buffer(target, mem_params[i].address, mem_params[i].size, mem_params[i].value);
+	}
+	/* Restore on timeout and unexpected exit as well as on success. */
+	int cleanup = agrv2k_restore_algorithm(target);
+	return cleanup != ERROR_OK ? cleanup : ret;
+}
+
+static int agrv2k_checksum_memory(struct target *target, target_addr_t address,
+		uint32_t count, uint32_t *checksum)
+{
+	static const uint8_t code[] = {
+#include "../../../contrib/loaders/checksum/riscv32_crc.inc"
+	};
+	if (target->state != TARGET_HALTED)
+		return ERROR_TARGET_NOT_HALTED;
+	if (address > UINT32_MAX || (uint64_t)count > UINT64_C(0x100000000) - address)
+		return ERROR_COMMAND_ARGUMENT_INVALID;
+	/* A CRC loader must not overwrite the SRAM image it is verifying. The
+	 * common checksum service falls back to a read when scratch overlaps. */
+	if (count && address < target->working_area_phys + target->working_area_size &&
+		address + count > target->working_area_phys)
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+	struct working_area *area;
+	int ret = target_alloc_working_area(target, sizeof(code), &area);
+	if (ret != ERROR_OK)
+		return ret;
+	ret = target_write_buffer(target, area->address, sizeof(code), code);
+	if (ret == ERROR_OK) {
+		struct reg_param params[2];
+		init_reg_param(&params[0], "a0", 32, PARAM_IN_OUT);
+		init_reg_param(&params[1], "a1", 32, PARAM_OUT);
+		buf_set_u32(params[0].value, 0, 32, address);
+		buf_set_u32(params[1].value, 0, 32, count);
+		ret = target_run_algorithm(target, 0, NULL, ARRAY_SIZE(params), params,
+			area->address, 0, 2000 + count / 50, NULL);
+		if (ret == ERROR_OK)
+			*checksum = buf_get_u32(params[0].value, 0, 32);
+		for (unsigned int i = 0; i < ARRAY_SIZE(params); ++i)
+			destroy_reg_param(&params[i]);
+	}
+	if (target->state != TARGET_HALTED) {
+		LOG_TARGET_ERROR(target, "CRC loader not halted; SRAM left intact, reset and reconnect required");
+		free(area->backup);
+		area->backup = NULL;
+		target_free_working_area(target, area);
+		return ret == ERROR_OK ? ERROR_FAIL : ret;
+	}
+	int cleanup = target_free_working_area(target, area);
+	return ret != ERROR_OK ? ret : cleanup;
 }
 
 static const char *agrv2k_gdb_arch(const struct target *target)
@@ -401,6 +623,9 @@ struct target_type agrv2k_target = {
 	.deassert_reset = agrv2k_reset_deassert,
 	.read_memory = agrv2k_read_memory,
 	.write_memory = agrv2k_write_memory,
+	.start_algorithm = agrv2k_start_algorithm,
+	.wait_algorithm = agrv2k_wait_algorithm,
+	.checksum_memory = agrv2k_checksum_memory,
 	.get_gdb_arch = agrv2k_gdb_arch,
 	.get_gdb_reg_list = agrv2k_gdb_regs,
 	.get_gdb_reg_list_noread = agrv2k_gdb_regs,

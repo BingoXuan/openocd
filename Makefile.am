@@ -66,10 +66,16 @@ EXTRA_DIST += \
 	README.Windows.md \
 	README.macOS.md \
 	README.ch347-agrv2k.md \
+	README.agrv2k-flash.md \
 	testing/agm/check-configs.py \
 	testing/agm/check-isolation.py \
 	testing/agm/test-agrv2k-dm.c \
 	testing/agm/flash-contracts.tcl \
+	testing/agm/test-flash-loader.py \
+	contrib/loaders/flash/agrv2k/agrv2k.S \
+	contrib/loaders/flash/agrv2k/agrv2k.inc \
+	contrib/loaders/flash/agrv2k/loader.ld \
+	contrib/loaders/flash/agrv2k/Makefile \
 	$(EXTRA_DIST_NEWS) \
 	Doxyfile.in \
 	LICENSES/license-rules.txt \

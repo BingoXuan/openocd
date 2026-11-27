@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define SRAM_BASE UINT32_C(0x20000000)
-#define SRAM_SIZE 256
+#define SRAM_SIZE 1024
 
 struct model {
 	uint32_t dmi[128];
@@ -15,7 +15,7 @@ struct model {
 	uint32_t csr[4096];
 	uint8_t memory[SRAM_SIZE];
 	int64_t time;
-	unsigned int reads, writes, memory_reads, memory_writes, commands, fences, batches;
+	unsigned int reads, writes, memory_reads, memory_writes, commands, fences, batches, write_batches;
 	bool running, reset, resume_ack, have_reset;
 	bool busy_abstract, busy_sba, stall_halt, reject_csr, progbuf_exception;
 	bool error_after_store;
@@ -195,10 +195,24 @@ static int model_write(void *ctx, uint32_t reg, uint32_t value)
 		return 0;
 	} else if (reg == AGRV2K_SBDATA0) {
 		store(m, m->dmi[AGRV2K_SBADDRESS0], 1U << ((m->dmi[AGRV2K_SBCS] >> 17) & 7), value);
+		if (m->dmi[AGRV2K_SBCS] & AGRV2K_SBAUTOINCREMENT)
+			m->dmi[AGRV2K_SBADDRESS0] += 1U << ((m->dmi[AGRV2K_SBCS] >> 17) & 7);
 		if (m->error_after_store)
 			m->dmi[AGRV2K_SBCS] |= 2U << 12;
 	}
 	m->dmi[reg] = value;
+	return 0;
+}
+
+static int model_write_many(void *ctx, uint32_t reg, const uint32_t *values, unsigned int count)
+{
+	struct model *m = ctx;
+	m->write_batches++;
+	assert(reg == AGRV2K_SBDATA0 && count <= 128);
+	for (unsigned int i = 0; i < count; ++i) {
+		if (model_write(ctx, reg, values[i]) != 0)
+			return -1;
+	}
 	return 0;
 }
 
@@ -225,7 +239,8 @@ static struct agrv2k_dm make_dm(struct model *m)
 		m->gpr[i] = UINT32_C(0x12340000) + i;
 	return (struct agrv2k_dm) {
 		.io = {.read = model_read, .write = model_write, .now_ms = model_now,
-			.sleep_ms = model_sleep, .ctx = m, .read_many = model_read_many},
+			.sleep_ms = model_sleep, .ctx = m, .read_many = model_read_many,
+			.write_many = model_write_many},
 		.timeout_ms = 10,
 	};
 }
@@ -383,7 +398,7 @@ static void check_burst(void)
 	uint8_t output[SRAM_SIZE];
 	assert(agrv2k_dm_read_memory(&dm, SRAM_BASE, 4, SRAM_SIZE / 4, output) == 0);
 	assert(!memcmp(output, m.memory, sizeof(output)));
-	assert(m.memory_reads == SRAM_SIZE / 4 && m.batches == 2);
+	assert(m.memory_reads == SRAM_SIZE / 4 && m.batches == (SRAM_SIZE / 4 + 30) / 32);
 	assert(!(m.dmi[AGRV2K_SBCS] & AGRV2K_SBREADONDATA));
 	/* A read at the last two words must not prefetch outside bounded SRAM. */
 	assert(agrv2k_dm_read_memory(&dm, SRAM_BASE + SRAM_SIZE - 8, 4, 2, output) == 0);
@@ -399,6 +414,35 @@ static void check_burst(void)
 	assert(!(m.dmi[AGRV2K_SBCS] & AGRV2K_SBREADONDATA));
 }
 
+static void check_write_burst(void)
+{
+	struct model m;
+	struct agrv2k_dm dm = make_dm(&m);
+	assert(agrv2k_dm_examine(&dm) == 0);
+	uint8_t input[SRAM_SIZE];
+	for (unsigned int i = 0; i < sizeof(input); ++i)
+		input[i] = (i * 43) ^ 0x93;
+	m.running = true;
+	assert(agrv2k_dm_write_memory(&dm, SRAM_BASE, 4, SRAM_SIZE / 4, input) == 0);
+	assert(!memcmp(input, m.memory, sizeof(input)) && m.write_batches == 2);
+	assert(m.memory_writes == SRAM_SIZE / 4 && m.commands == 0);
+	assert(!(m.dmi[AGRV2K_SBCS] & AGRV2K_SBAUTOINCREMENT));
+	m.error_after_store = true;
+	unsigned int before = m.memory_writes;
+	assert(agrv2k_dm_write_memory(&dm, SRAM_BASE, 4, 2, input) == AGRV2K_DM_COMMAND_ERROR);
+	assert(m.memory_writes - before == 2 && m.commands == 0);
+	assert(!(m.dmi[AGRV2K_SBCS] & (AGRV2K_SBERROR_MASK | AGRV2K_SBAUTOINCREMENT)));
+	m.error_after_store = false;
+	m.fail_write = AGRV2K_SBDATA0;
+	assert(agrv2k_dm_write_memory(&dm, SRAM_BASE, 4, 2, input) == AGRV2K_DM_IO);
+	m.fail_write = -1;
+	assert(agrv2k_dm_write_memory(&dm, SRAM_BASE, 4, 2, input) == 0);
+	/* A one-word peripheral/Flash write must retain the checked scalar path. */
+	before = m.write_batches;
+	assert(agrv2k_dm_write_memory(&dm, SRAM_BASE, 4, 1, input) == 0);
+	assert(m.write_batches == before);
+}
+
 int main(void)
 {
 	check_probe();
@@ -409,6 +453,7 @@ int main(void)
 	check_progbuf_failure();
 	check_reset_and_contexts();
 	check_burst();
-	puts("AGRV2K_DM_CONTRACTS_PASS groups=8");
+	check_write_burst();
+	puts("AGRV2K_DM_CONTRACTS_PASS groups=9");
 	return 0;
 }

@@ -51,7 +51,7 @@ def main():
             pending.append(target)
 
     source = Path(__file__).resolve().parents[1]
-    for name in ("COPYING", "AUTHORS", "README.Windows.md"):
+    for name in ("COPYING", "AUTHORS", "README.Windows.md", "README.agrv2k-flash.md"):
         shutil.copy2(source / name, prefix / name)
     licenses = runtime / "share/licenses"
     if licenses.is_dir():
@@ -65,7 +65,7 @@ def main():
     metadata = {
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
         "platform": "windows-x64-ucrt",
-        "features": ["agrv2k", "ch347", "cmsis-dap", "cmsis-dap-v2", "ftdi"],
+        "features": ["agrv2k", "agrv2k-flash", "agrv2k-sram-loader", "ch347", "cmsis-dap", "cmsis-dap-v2", "ftdi"],
         "dlls": sorted(name for name in checked if name.endswith(".dll")),
     }
     (prefix / "build-info.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

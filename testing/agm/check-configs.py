@@ -36,7 +36,9 @@ def main():
     for name, config in cases.items():
         query = []
         if name.endswith("swd"):
-            query = ["-c", "echo [target names]", "-c", "echo [agrv2k.cpu cget -ap-num]"]
+            query = ["-c", "echo [target names]", "-c", "echo [agrv2k.cpu cget -ap-num]",
+                     "-c", "echo [agrv2k.cpu cget -work-area-phys]",
+                     "-c", "echo [agrv2k.cpu cget -work-area-size]"]
         proc = subprocess.run(
             [str(binary), "-s", str(root / "tcl"), *config, *query, "-c", "shutdown"],
             text=True, capture_output=True, timeout=15, check=False,
@@ -48,6 +50,7 @@ def main():
         passed = proc.returncode == 0 and (upstream_teardown or "Error:" not in output)
         if name.endswith("swd"):
             passed = passed and "agrv2k.cpu" in output and "\n0\n" in output
+            passed = passed and "0x20018000" in output and "0x00008000" in output
         results.append({"case": name, "passed": passed, "returncode": proc.returncode, "output": output})
     proc = subprocess.run(
         [str(binary), "-c", "adapter driver cmsis-dap", "-c", "transport select swd",

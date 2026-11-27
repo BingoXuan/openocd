@@ -355,6 +355,40 @@ static void store_le32(uint8_t *buffer, uint32_t value)
 		buffer[i] = value >> (8 * i);
 }
 
+static int write_memory_burst(struct agrv2k_dm *dm, uint32_t address,
+		uint32_t count, const uint8_t *buffer)
+{
+	int ret = sba_wait(dm);
+	if (ret != AGRV2K_DM_OK)
+		return ret;
+	ret = agrv2k_dm_write(dm, AGRV2K_SBCS, (2U << 17) | AGRV2K_SBAUTOINCREMENT);
+	if (ret == AGRV2K_DM_OK)
+		ret = agrv2k_dm_write(dm, AGRV2K_SBADDRESS0, address);
+	while (ret == AGRV2K_DM_OK && count) {
+		uint32_t values[128];
+		unsigned int words = count < 128 ? count : 128;
+		for (unsigned int i = 0; i < words; ++i) {
+			values[i] = 0;
+			for (unsigned int j = 0; j < 4; ++j)
+				values[i] |= (uint32_t)*buffer++ << (8 * j);
+		}
+		if (dm->io.write_many(dm->io.ctx, AGRV2K_SBDATA0, values, words) != 0)
+			ret = AGRV2K_DM_IO;
+		else
+			ret = sba_wait(dm);
+		count -= words;
+	}
+	/* A batch may have written a prefix. Never replay it or fall back. */
+	uint32_t status;
+	int cleanup = wait_bits(dm, AGRV2K_SBCS, AGRV2K_SBBUSY, 0, &status);
+	if (cleanup == AGRV2K_DM_OK)
+		cleanup = agrv2k_dm_write(dm, AGRV2K_SBCS,
+			(2U << 17) | AGRV2K_SBERROR_MASK | AGRV2K_SBBUSYERROR);
+	if (ret == AGRV2K_DM_OK)
+		ret = cleanup;
+	return ret;
+}
+
 static int read_memory_burst(struct agrv2k_dm *dm, uint32_t address,
 		uint32_t count, uint8_t *buffer)
 {
@@ -370,21 +404,23 @@ static int read_memory_burst(struct agrv2k_dm *dm, uint32_t address,
 		/* Every data read starts the next access. Leave the final word for
 		 * a non-triggering read, so no access goes past the requested range. */
 		unsigned int words = count - 1 < 32 ? count - 1 : 32;
-		uint32_t regs[64], values[64];
+		uint32_t regs[33], values[33];
 		for (unsigned int i = 0; i < words; ++i) {
-			regs[2 * i] = AGRV2K_SBCS;
-			regs[2 * i + 1] = AGRV2K_SBDATA0;
+			regs[i] = AGRV2K_SBDATA0;
 		}
-		if (dm->io.read_many(dm->io.ctx, regs, values, words * 2) != 0) {
+		/* Sticky SBA errors validate the complete bounded batch. Repeated
+		 * SBDATA reads reuse AP TAR instead of alternating it for every word. */
+		regs[words] = AGRV2K_SBCS;
+		if (dm->io.read_many(dm->io.ctx, regs, values, words + 1) != 0) {
 			ret = AGRV2K_DM_IO;
 			break;
 		}
+		if (values[words] & (AGRV2K_SBBUSY | AGRV2K_SBBUSYERROR | AGRV2K_SBERROR_MASK)) {
+			ret = AGRV2K_DM_COMMAND_ERROR;
+			break;
+		}
 		for (unsigned int i = 0; i < words; ++i) {
-			if (values[2 * i] & (AGRV2K_SBBUSY | AGRV2K_SBBUSYERROR | AGRV2K_SBERROR_MASK)) {
-				ret = AGRV2K_DM_COMMAND_ERROR;
-				break;
-			}
-			store_le32(buffer, values[2 * i + 1]);
+			store_le32(buffer, values[i]);
 			buffer += 4;
 		}
 		count -= words;
@@ -437,6 +473,12 @@ int agrv2k_dm_write_memory(struct agrv2k_dm *dm, uint32_t address,
 	int ret = memory_check(address, size, count);
 	if (ret != AGRV2K_DM_OK)
 		return ret;
+	/* Never batch Flash programming or peripheral writes. Only ordinary
+	 * SRAM can be staged while the asynchronous loader is running. */
+	if (size == 4 && count > 1 && has_sba(dm, size) && dm->io.write_many &&
+		address >= UINT32_C(0x20000000) &&
+		(uint64_t)address + 4ULL * count <= UINT32_C(0x20020000))
+		return write_memory_burst(dm, address, count, buffer);
 	for (uint32_t i = 0; i < count; ++i) {
 		uint32_t value = 0;
 		for (unsigned int j = 0; j < size; ++j)

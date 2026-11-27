@@ -49,9 +49,9 @@ transaction fails.
 
 **This is not a replacement for the full upstream RISC-V target.** Hardware
 triggers, software breakpoints, FPU registers, SMP, virtual memory,
-semihosting, and target algorithms are not implemented. GDB interoperability,
-VF407 SWD/debug/SRAM execution, and flash erase/program/restore have not been
-qualified on physical hardware. Host simulation is not silicon acceptance.
+semihosting are not implemented. SRAM algorithm execution is available for
+the isolated Flash and CRC loaders. GDB interoperability and board-specific acceptance are separate from the
+source and model checks documented below.
 
 ## Build
 
@@ -72,7 +72,7 @@ On Debian/Ubuntu, use `build-essential autoconf automake libtool pkg-config
 libusb-1.0-0-dev libhidapi-dev git`.
 
 ```sh
-git clone --branch agrv2k-isolated https://github.com/BingoXuan/openocd.git
+git clone --branch feat-agrv2k-support https://github.com/BingoXuan/openocd.git
 cd openocd
 bash contrib/build-ch347-agrv2k.sh "$PWD/../openocd-prefix"
 export OPENOCD="$PWD/../openocd-prefix/bin/openocd"
@@ -80,8 +80,8 @@ export OPENOCD="$PWD/../openocd-prefix/bin/openocd"
 
 The dedicated helper explicitly passes `--enable-agrv2k`. A normal configure
 without that option excludes the AGM objects and target registration.
-The two shared registry additions and Automake/configure integration are
-the only changes needed outside the new driver and board/test files.
+Shared integration is limited to the explicit target/Flash registries and
+Automake/configure; the generic RISC-V implementation remains unchanged.
 
 ## VF407 / AGRV2K
 
@@ -101,14 +101,13 @@ reads DEVICE_ID at `0x03000100`. The board-only profile can follow a different
 compatible SWD adapter. CH347 JTAG success on a Zynq board does not qualify
 CH347 SWD on VF407; firmware support and wiring must be checked independently.
 
-The profile describes 1 MiB main flash at `0x80000000`, 4096-byte sectors,
-4-byte words, and controller `0x40001000`. The experimental explicit Tcl
-procedures `agrv2k_flash_erase ADDRESS LENGTH` and
-`agrv2k_flash_program FILE.bin ADDRESS` require an already halted target.
-Program does not erase first; it pads a final word with 0xff and verifies
-successful writes. Busy/error checks have deadlines and relocking is best
-effort if communication fails or hardware remains busy. No option bytes are
-written and no native `flash bank ... agrv` driver is included.
+The profile describes 1 MiB main Flash at `0x80000000`, 4096-byte sectors,
+4-byte words, and controller `0x40001000`. A native `agrv2k` NOR driver
+programs through an SRAM loader. The explicit Tcl procedures
+`agrv2k_flash_erase ADDRESS LENGTH` and `agrv2k_flash_program FILE.bin ADDRESS`
+remain available; program does not erase first and verifies successful writes.
+No option bytes are written. See [AGRV2K main Flash](README.agrv2k-flash.md)
+for native commands, working-area requirements and validation interfaces.
 
 The writable prefix defaults to 0xe7000 bytes to preserve the current Leego
 CPLD startup tail. Actual board contents/layout must be read and backed up
@@ -175,4 +174,4 @@ flash contract test mocks all target I/O. Neither test opens USB or performs
 real flash writes. The configured upstream `make check` tests remain available.
 
 All new files use GPL-2.0-or-later. The original prototype remains on its own
-branch for history; use `agrv2k-isolated` for this implementation.
+branch for history; use `feat-agrv2k-support` for this implementation.

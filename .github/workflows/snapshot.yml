@@ -3,8 +3,9 @@ name: Windows build
 
 on:
   push:
+    branches: [feat-agrv2k-support]
   pull_request:
-  workflow_dispatch:
+    branches: [feat-agrv2k-support]
 
 permissions:
   contents: read
@@ -15,6 +16,7 @@ concurrency:
 
 jobs:
   windows-x64:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/feat-agrv2k-support'
     runs-on: windows-2025
     timeout-minutes: 30
     defaults:
@@ -79,6 +81,30 @@ jobs:
             testing/agm/test-agrv2k-dm.c src/target/agm/agrv2k_dm.c \
             -o ci-results/test-agrv2k-dm.exe
           ./ci-results/test-agrv2k-dm.exe | tee ci-results/dm-contracts.txt
+          python testing/agm/test-flash-loader.py 2>&1 | tee ci-results/flash-loader.txt
+          mkdir -p ci-results/flash-temp
+          "$(cygpath -u "$RUNNER_TEMP")/openocd-build/jimtcl/jimsh.exe" \
+            testing/agm/flash-contracts.tcl tcl/target/agm/agrv2k-flash.tcl \
+            ci-results/flash-temp | tee ci-results/flash-contracts.txt
+
+      - name: Verify AGM stays disabled by default
+        run: |
+          set -euo pipefail
+          source_dir="$PWD"
+          disabled_dir="$(cygpath -u "$RUNNER_TEMP")/openocd-default"
+          mkdir -p "$disabled_dir"
+          cd "$disabled_dir"
+          "$source_dir/configure" --host=x86_64-w64-mingw32 \
+            --enable-ch347 --enable-cmsis-dap --enable-cmsis-dap-v2 \
+            --enable-internal-jimtcl --disable-jlink --without-capstone \
+            --disable-werror --disable-doxygen-html --disable-doxygen-pdf MAKEINFO=true
+          make -j4
+          make check
+          cp config.log "$source_dir/ci-results/default-config.log"
+          cd "$source_dir"
+          python testing/agm/check-isolation.py \
+            --openocd "$(cygpath -u "$RUNNER_TEMP")/openocd-windows-x64/bin/openocd.exe" \
+            --disabled-openocd "$disabled_dir/src/openocd.exe" > ci-results/isolation.json
 
       - name: Bundle executable, runtime DLLs and scripts
         run: |
